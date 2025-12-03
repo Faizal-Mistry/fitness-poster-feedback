@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+langchain
+# langchain-core
+langchain-community
+# langchain-google-genai    # if using Gemini
+# langchain-qwq            # if using Qwen (or appropriate package)
+python-dotenv
