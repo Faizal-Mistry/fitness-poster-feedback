@@ -4,6 +4,7 @@ from typing import Optional
 
 class RepSummary(BaseModel):
     rep_id: int
+    limb_id: Optional[str] = None
     duration_s: float
     hip_vertical_range: float
     knee_min_angle: float
