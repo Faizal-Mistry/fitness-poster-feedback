@@ -100,6 +100,8 @@ class PoseEstimator:
             "elbow_min_angle_frame": elbow_min,
             "torso_dev_frame": torso_dev,
             "center_hip_y": center_hip_y,
+            "left_knee_angle_frame": float(left_knee_angle),
+            "right_knee_angle_frame": float(right_knee_angle),
         }
 
         return features, results.pose_landmarks
