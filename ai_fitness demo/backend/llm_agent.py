@@ -1,3 +1,5 @@
+
+
 # backend/llm_agent.py   pure llm, no dummy logic 
 
 import os
@@ -8,10 +10,12 @@ dotenv.load_dotenv()
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
-
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 _llm = ChatGroq(
+    api_key=GROQ_API_KEY,
     # model="llama-3.1-8b-instant",
     # model="qwen/qwen3-32b", 
      model="llama-3.3-70b-versatile", 
@@ -19,6 +23,15 @@ _llm = ChatGroq(
     max_retries=1,
     timeout=1.5,
 )
+
+# _llm = ChatGoogleGenerativeAI(
+#     api_key=GOOGLE_API_KEY,
+#     # model="gemini-2.5-flash", 
+#     model="gemini-2.5-flash-lite",
+#     temperature=0.2,
+#     max_retries=1,
+#     timeout=1.5,
+# )
 
 SYSTEM_PROMPT = (
     "You are **Technometics AI Coach**, the official real-time fitness coach voice "
