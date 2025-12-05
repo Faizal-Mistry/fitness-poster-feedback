@@ -1,153 +1,116 @@
-# backend/llm_agent.py
+# backend/llm_agent.py   pure llm, no dummy logic 
+
+import os
 import json
-from typing import Dict
+from typing import Dict, Optional
+import dotenv
+dotenv.load_dotenv()
 
-"""
-TEMP VERSION: No real LLM calls.
-Uses only dummy_coaching() so backend is always fast and never times out.
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
-Once the end-to-end demo is stable, we can plug in Qwen/Gemini here.
-"""
 
-def dummy_coaching(rep_summary: Dict) -> Dict:
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+_llm = ChatGroq(
+    # model="llama-3.1-8b-instant",
+    # model="qwen/qwen3-32b", 
+     model="llama-3.3-70b-versatile", 
+    temperature=0.2,
+    max_retries=1,
+    timeout=1.5,
+)
+
+SYSTEM_PROMPT = (
+    "You are **Technometics AI Coach**, the official real-time fitness coach voice "
+    "inside the Technometics workout app.\n\n"
+    "Your job: for EACH rep, give super short, clear voice feedback that feels like a "
+    "professional trainer talking directly to the user.\n\n"
+    "Important style rules:\n"
+    "- Sound confident, supportive and energetic, but not cringe.\n"
+    "- Talk directly to the user as \"you\".\n"
+    "- Keep the message VERY short: ideally 5–10 words, never more than 12.\n"
+    "- No emojis, no hashtags, no extra punctuation.\n"
+    "- No long explanations, no technical terms. Simple gym language.\n"
+    "- Never mention JSON, fields, data, or that you are an AI.\n"
+    "- Do NOT repeat the same sentence too many times in a row if possible.\n\n"
+    "You receive numeric data for a SINGLE rep of an exercise.\n"
+    "You MUST respond with a SINGLE JSON object ONLY, no commentary, no markdown.\n\n"
+    "JSON format:\n"
+    "{\n"
+    '  \"exercise\": string,          // exercise name\n'
+    '  \"main_issue\": string | null, // e.g., \"shallow_depth\", \"torso_lean\" or null\n'
+    '  \"severity\": \"none\" | \"low\" | \"medium\" | \"high\",\n'
+    '  \"message\": string            // short spoken feedback in Technometics AI Coach style\n'
+    "}\n\n"
+    "Signals you get in the rep JSON:\n"
+    "- exercise_hint: squat, pushup, bicep_curl, lunge, mountain_climber\n"
+    "- limb_id: global, left, right\n"
+    "- duration_s: rep time in seconds\n"
+    "- knee_min_angle: smallest knee angle (degrees, 180 = straight)\n"
+    "- elbow_min_angle: smallest elbow angle\n"
+    "- torso_max_lean_deg: torso lean from vertical (bigger = more lean)\n"
+    "- hip_vertical_range: hip up-down movement\n"
+    "- movement_smoothness: 0..1 (bigger = smoother)\n"
+    "- avg_confidence: 0..1 (tracking quality)\n\n"
+    "Guidelines for feedback:\n"
+    "- If form is good → severity=\"none\" and a positive, short reinforcement like "
+    "  \"Nice rep, keep that form\".\n"
+    "- If squat/lunge depth is shallow (knee_min_angle > 130) → mention going deeper.\n"
+    "- For pushup with elbow_min_angle > 130 → mention bending elbows and going lower.\n"
+    "- If torso_max_lean_deg > 30 → mention keeping hips or chest in a better line.\n"
+    "- If duration_s < 0.4 → mention slowing down and controlling the rep.\n"
+    "- Use limb_id when useful, e.g. \"Drive your left knee higher\".\n"
+    "- Always keep the message short, natural, and easy to speak aloud.\n"
+)
+
+def _parse_llm_json(raw: str) -> Optional[Dict]:
+    """Extract JSON from raw LLM output."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        s = text.index("{")
+        e = text.rindex("}") + 1
+        return json.loads(text[s:e])
+    except Exception:
+        return None
+
+
+def analyze_rep_with_llm(rep_summary: Dict) -> Optional[Dict]:
     """
-    Simple fallback coaching logic based only on numeric features.
-    This is fast and runs locally.
+    Calls Groq LLM and returns the parsed JSON dict.
+    If LLM fails for ANY reason → return None (NO fallback coaching).
     """
-    exercise = (rep_summary.get("exercise_hint") or "unknown").lower()
-    knee = rep_summary.get("knee_min_angle", 180.0)
-    elbow = rep_summary.get("elbow_min_angle", 180.0)
-    torso = rep_summary.get("torso_max_lean_deg", 0.0)
-    duration = rep_summary.get("duration_s", 1.0)
-    hip_range = rep_summary.get("hip_vertical_range", 0.0)
+    exercise = rep_summary.get("exercise_hint") or "unknown"
+    limb_id = rep_summary.get("limb_id") or "global"
 
-    # Squat
-    if exercise == "squat":
-        if knee > 135:
-            return {
-                "exercise": "squat",
-                "main_issue": "shallow_depth",
-                "severity": "low",
-                "message": "Go a bit deeper in your squat."
-            }
-        if torso > 30:
-            return {
-                "exercise": "squat",
-                "main_issue": "leaning_forward",
-                "severity": "medium",
-                "message": "Keep your chest up and reduce forward lean."
-            }
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Exercise: {exercise}\n"
+                f"Limb: {limb_id}\n"
+                f"Rep JSON: {json.dumps(rep_summary, ensure_ascii=False)}"
+            )
+        )
+    ]
 
-    # Pushup
-    if exercise == "pushup":
-        if elbow > 130:
-            return {
-                "exercise": "pushup",
-                "main_issue": "shallow_depth",
-                "severity": "low",
-                "message": "Bend elbows more and lower your chest."
-            }
-        if torso > 25:
-            return {
-                "exercise": "pushup",
-                "main_issue": "hips_sagging",
-                "severity": "medium",
-                "message": "Keep your body in a straight line."
-            }
+    try:
+        resp = _llm.invoke(messages)
+        raw = resp.content if hasattr(resp, "content") else str(resp)
+        parsed = _parse_llm_json(raw)
 
-    # Bicep curl
-    if exercise == "bicep_curl":
-        if elbow > 80:
-            return {
-                "exercise": "bicep_curl",
-                "main_issue": "shallow_depth",
-                "severity": "low",
-                "message": "Curl higher to fully contract your biceps."
-            }
-        if duration < 0.3:
-            return {
-                "exercise": "bicep_curl",
-                "main_issue": "too_fast",
-                "severity": "low",
-                "message": "Slow down and control each curl."
-            }
+        if not parsed:
+            print("[LLM ERROR] Could not parse JSON. Raw:", raw)
+            return None   # ❌ Do not generate fallback coaching
+        return parsed
 
-    # Lunge
-    if exercise == "lunge":
-        if knee > 135:
-            return {
-                "exercise": "lunge",
-                "main_issue": "shallow_depth",
-                "severity": "low",
-                "message": "Drop your back knee lower for a deeper lunge."
-            }
-        if hip_range < 4.0:
-            return {
-                "exercise": "lunge",
-                "main_issue": "not_moving_enough",
-                "severity": "low",
-                "message": "Step a bit bigger and lower into the lunge."
-            }
-        if torso > 30:
-            return {
-                "exercise": "lunge",
-                "main_issue": "leaning_forward",
-                "severity": "medium",
-                "message": "Keep your torso more upright in the lunge."
-            }
-
-    # Mountain climber
-    if exercise == "mountain_climber":
-        if knee > 110:
-            return {
-                "exercise": "mountain_climber",
-                "main_issue": "short_range",
-                "severity": "low",
-                "message": "Drive your knee closer toward your chest."
-            }
-        if duration < 0.2:
-            return {
-                "exercise": "mountain_climber",
-                "main_issue": "too_fast",
-                "severity": "low",
-                "message": "Control the movement, not just speed."
-            }
-        if torso > 25:
-            return {
-                "exercise": "mountain_climber",
-                "main_issue": "hips_too_high",
-                "severity": "medium",
-                "message": "Keep your hips lower in a plank position."
-            }
-
-    # Generic checks (apply to any exercise)
-    if torso > 35:
-        return {
-            "exercise": exercise,
-            "main_issue": "leaning_forward",
-            "severity": "medium",
-            "message": "Reduce torso swing and stay upright."
-        }
-
-    if duration < 0.4:
-        return {
-            "exercise": exercise,
-            "main_issue": "too_fast",
-            "severity": "low",
-            "message": "Slow down a bit and control the movement."
-        }
-
-    return {
-        "exercise": exercise,
-        "main_issue": None,
-        "severity": "none",
-        "message": "Great rep, keep going!"
-    }
-
-
-def analyze_rep_with_llm(rep_summary: Dict) -> Dict:
-    """
-    TEMP: just call dummy_coaching.
-    Later we'll connect this to a real LLM (Qwen/Gemini).
-    """
-    return dummy_coaching(rep_summary)
+    except Exception as e:
+        print("[LLM ERROR] Exception calling Groq:", e)
+        return None       # ❌ Do not generate fallback coaching
