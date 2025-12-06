@@ -82,7 +82,7 @@ def llm_worker():
         rep_summary = rep_queue.get()
         try:
             # Small timeout: if LLM is slow, we just skip that message
-            resp = requests.post(BACKEND_URL, json=rep_summary, timeout=2.0)
+            resp = requests.post(BACKEND_URL, json=rep_summary, timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
                 msg = data.get("message", "")
@@ -270,4 +270,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
