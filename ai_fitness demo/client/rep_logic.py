@@ -1,4 +1,4 @@
-# client/rep_logic.py
+# client/rep_logic.py 
 
 import time
 import numpy as np
@@ -25,9 +25,9 @@ class SingleLimbState:
 class MultiRepState:
     """
     Holds a separate SingleLimbState for each logical limb:
-      - "global"  : whole-body reps (squats, pushups, curls)
-      - "left"    : left-side leg/arm
-      - "right"   : right-side leg/arm
+      - "global"  : whole-body reps (squats, pushups, curls, lunges, mountain climber)
+      - "left"    : left-side leg/arm  (for future alternating exercises)
+      - "right"   : right-side leg/arm (for future alternating exercises)
     """
     limb_states: Dict[str, SingleLimbState] = field(default_factory=dict)
 
@@ -35,14 +35,14 @@ class MultiRepState:
 # ----------------- Per-exercise configuration -----------------
 EXERCISE_CONFIG: Dict[str, Dict[str, Any]] = {
     "squat": {
-        "limbs": ["global"],          # treat whole body as one unit
+        "limbs": ["global"],
         "primary_joint": "knee",
         "flexed_threshold": 35.0,
         "extended_threshold": 15.0,
-        "min_rep_duration": 0.2,      # ignore very short motions
-        "min_rest_time": 0.08,        # short rest after each rep
+        "min_rep_duration": 0.20,
+        "min_rest_time": 0.08,
         "use_limb_delta": False,
-        "limb_activation_delta": 0.0, # not used
+        "limb_activation_delta": 0.0,
     },
     "pushup": {
         "limbs": ["global"],
@@ -65,7 +65,6 @@ EXERCISE_CONFIG: Dict[str, Dict[str, Any]] = {
         "limb_activation_delta": 0.0,
     },
     "lunge": {
-        # You can later make this ["left", "right"] if you want separate legs
         "limbs": ["global"],
         "primary_joint": "knee",
         "flexed_threshold": 45.0,
@@ -76,16 +75,18 @@ EXERCISE_CONFIG: Dict[str, Dict[str, Any]] = {
         "limb_activation_delta": 0.0,
     },
     "mountain_climber": {
-        # Alternating exercise → use separate left/right logic
-        "limbs": ["left", "right"],
+        # Mountain climber: count 1 global rep per strong knee-drive cycle
+        "limbs": ["global"],
         "primary_joint": "knee",
-        "flexed_threshold": 40.0,     # need decent bend
-        "extended_threshold": 20.0,   # back near straight
-        "min_rep_duration": 0.15,     # ignore super tiny knee flicks
-        "min_rest_time": 0.06,        # small cooldown after each rep
-        # Key for avoiding extra reps:
-        "use_limb_delta": True,
-        "limb_activation_delta": 15.0,  # knee must be 20° more bent than other side
+        # need decent knee drive to count rep
+        "flexed_threshold": 50.0,       # stricter bend
+        "extended_threshold": 25.0,     # back closer to straight
+        # tuned for fast but not crazy-fast reps
+        "min_rep_duration": 0.16,       # ignore ultra-tiny flicks
+        "min_rest_time": 0.08,          # short cooldown
+        # no per-leg gating in this version
+        "use_limb_delta": False,
+        "limb_activation_delta": 0.0,
     },
 }
 
@@ -121,18 +122,16 @@ def update_multi_rep_state(
     Generic multi-limb rep detection.
 
     - For exercises with limbs=["global"], we track a single state.
-    - For limbs=["left","right"], we track separate states for each side
-      (e.g., mountain climber legs).
+    - For limbs=["left","right"], we *can* track separate states for each side
+      (useful for future alternating exercises if needed).
     - A rep is counted when state: EXTENDED -> FLEXED -> EXTENDED,
       with min_rep_duration and min_rest_time checks.
-    - For alternating exercises (like mountain_climber), we also apply
-      limb_activation_delta so ONLY the clearly more-bent leg counts.
     """
     now = time.time()
     cfg = get_exercise_config(exercise_hint)
 
     limbs = cfg["limbs"]
-    primary_joint = cfg["primary_joint"]        # "knee" or "elbow"
+    primary_joint = cfg["primary_joint"]
     flexed_threshold = cfg["flexed_threshold"]
     extended_threshold = cfg["extended_threshold"]
     min_rep_duration = cfg["min_rep_duration"]
@@ -164,60 +163,52 @@ def update_multi_rep_state(
 
     completed_reps: List[Dict[str, Any]] = []
 
-    # Helper to get limb-specific joint angle and flex
     def get_limb_joint_flex(limb: str):
         if primary_joint == "knee":
             if limb == "left":
                 return left_knee_angle, left_knee_flex
             elif limb == "right":
                 return right_knee_angle, right_knee_flex
-            else:  # "global"
+            else:
+                # "global" → use the most bent knee as driver
                 return knee_min_angle, max(left_knee_flex, right_knee_flex)
-        else:  # primary_joint == "elbow"
+        else:
             if limb == "left":
                 return left_elbow_angle, left_elbow_flex
             elif limb == "right":
                 return right_elbow_angle, right_elbow_flex
             else:
+                # "global" → use the most bent elbow as driver
                 return elbow_min_angle, max(left_elbow_flex, right_elbow_flex)
-
-    # For alternating exercises, we want to compare both sides
-    if use_limb_delta and "left" in limbs and "right" in limbs:
-        # We'll compute 'other' flex inside the loop
-        pass
 
     for limb_id in limbs:
         state = multi_state.limb_states[limb_id]
         joint_angle, flex_amount = get_limb_joint_flex(limb_id)
 
-        # ----- Optional limb activation gating -----
-        # For alternating moves (mountain_climber), only treat this limb as active
-        # if it's clearly more bent than the other limb.
+        # ---------- Limb activation gating (currently only useful if we use left/right) ----------
         if use_limb_delta and limb_id in ("left", "right"):
+            # Compare with the other side (for future alternating exercises)
             if limb_id == "left":
                 _, other_flex = get_limb_joint_flex("right")
             else:
                 _, other_flex = get_limb_joint_flex("left")
 
-            # If not significantly more bent, treat as nearly extended
+            # If THIS limb is not clearly more bent, treat it as almost straight
+            # so it can't cross flexed_threshold and start a rep.
             if flex_amount < other_flex + limb_activation_delta:
-                # This prevents double-counting when both legs are partially bent.
-                # We "dampen" flex so it won't cross flexed_threshold.
-                # NOTE: don't override joint_angle, only flex_amount.
-                pass  # we just don't boost flex_amount here; comparison below will handle it
+                flex_amount = 0.0  # effectively "not active" this frame
 
         # -----------------------------
         # State machine per limb
         # -----------------------------
         if state.state == "EXTENDED":
-            # Check if limb is currently in rest cooldown
+            # Small cooldown after a rep
             if state.last_rep_end_time is not None:
                 time_since_last = now - state.last_rep_end_time
-                if time_since_last < min_rest_time:
-                    # Still in cooldown → ignore motions
+                if time_since_last < min_rep_duration:
                     continue
 
-            # Start new rep only when we bend enough
+            # Start rep when we bend enough
             if flex_amount > flexed_threshold:
                 state.state = "FLEXED"
                 state.rep_start_time = now
@@ -229,23 +220,22 @@ def update_multi_rep_state(
                 state.confidences = [avg_confidence]
 
         elif state.state == "FLEXED":
-            # Accumulate measurements
+            # Accumulate during rep
             state.hip_positions.append(center_hip_y)
             state.knee_angles.append(knee_min_angle)
             state.elbow_angles.append(elbow_min_angle)
             state.torso_devs.append(torso_dev)
             state.confidences.append(avg_confidence)
 
-            # Rep finishes when limb returns near straight
+            # Rep ends when nearly straight again
             if flex_amount < extended_threshold:
                 state.state = "EXTENDED"
                 end_time = now
                 start_time = state.rep_start_time or end_time
                 duration = end_time - start_time
 
-                # Ignore extremely short "reps" (jitter/noise)
+                # Ignore ultra-short reps (noise)
                 if duration < min_rep_duration:
-                    # Just reset without counting
                     state.rep_start_time = None
                     state.hip_positions.clear()
                     state.knee_angles.clear()
@@ -255,7 +245,7 @@ def update_multi_rep_state(
                     state.last_rep_end_time = end_time
                     continue
 
-                # Count a real rep
+                # Valid rep
                 state.rep_id += 1
 
                 hip_vertical_range = 0.0
@@ -272,8 +262,8 @@ def update_multi_rep_state(
                     "knee_min_angle": float(min(state.knee_angles)) if state.knee_angles else 180.0,
                     "elbow_min_angle": float(min(state.elbow_angles)) if state.elbow_angles else 180.0,
                     "torso_max_lean_deg": float(max(state.torso_devs)) if state.torso_devs else 0.0,
-                    "left_right_asymmetry": 0.0,  # can compute later if needed
-                    "movement_smoothness": 0.8,   # placeholder
+                    "left_right_asymmetry": 0.0,
+                    "movement_smoothness": 0.8,
                     "avg_confidence": float(np.mean(state.confidences)) if state.confidences else 0.0,
                     "exercise_hint": exercise_hint,
                 }
